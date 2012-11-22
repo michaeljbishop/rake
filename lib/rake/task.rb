@@ -196,11 +196,17 @@ module Rake
         end
       end
       if self.invoke_prereqs_concurrently?
-        # we save the first invocation for this thread
+        # add the prerequisites to the thread-pool queue, but instruct
+        # the invocation to bail if the lock is already held by another thread.
+        # We also save the first invocation for the current thread
         invocations.drop(1).each do |invocation|
           application.thread_pool.start(false,&invocation)
         end
       end
+      # make sure all the invocations are called. If we are executing them
+      # concurrently, by the time we get to them, they
+      # may have already been called by the thread-pool but we will skip them since
+      # @already_invoked will be true
       invocations.each do |invocation|
         invocation.call(true)
       end
