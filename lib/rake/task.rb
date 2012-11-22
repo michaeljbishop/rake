@@ -177,24 +177,24 @@ module Rake
     end
     private :add_chain_to
 
+    # should we invoke our prerequsites in parallel?
+    def invoke_prereqs_concurrently? # :nodoc:
+      application.options.always_multitask
+    end
+    protected :invoke_prereqs_concurrently?
+    
     # Invoke all the prerequisites of a task.
     def invoke_prerequisites(task_args, invocation_chain) # :nodoc:
-      if application.options.always_multitask
-        invoke_prerequisites_concurrently(task_args, invocation_chain)
-      else
-        prerequisite_tasks.each { |p|
-          prereq_args = task_args.new_scope(p.arg_names)
-          p.invoke_with_call_chain(prereq_args, invocation_chain)
-        }
-      end
-    end
-
-    # Invoke all the prerequisites of a task in parallel.
-    def invoke_prerequisites_concurrently(task_args, invocation_chain) # :nodoc:
-      futures = prerequisite_tasks.collect do |p|
+      futures = []
+      prerequisite_tasks.each do |p|
         prereq_args = task_args.new_scope(p.arg_names)
-        application.thread_pool.future(p) do |r|
+        invocation = proc do |r|
           r.invoke_with_call_chain(prereq_args, invocation_chain)
+        end
+        if self.invoke_prereqs_concurrently?
+          futures << application.thread_pool.future(p,&invocation)
+        else
+          invocation.call(p)
         end
       end
       futures.each { |f| f.value }

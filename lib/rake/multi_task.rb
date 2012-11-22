@@ -4,9 +4,9 @@ module Rake
   # parallel using Ruby threads.
   #
   class MultiTask < Task
-    private
-    def invoke_prerequisites(task_args, invocation_chain) # :nodoc:
-      invoke_prerequisites_concurrently(task_args, invocation_chain)
+    protected
+    def invoke_prereqs_concurrently? # :nodoc:
+      true
     end
   end
 
