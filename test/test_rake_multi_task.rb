@@ -55,5 +55,26 @@ class TestRakeMultiTask < Rake::TestCase
     assert @runs[0] == "b"
     assert @runs[1] == "bmt"
   end
+  
+  def test_multitasks_run_in_parallel
+    num_tasks = 10
+    sleep_time = 0.1
+    threads = Set.new
+    threads_m = Mutex.new
+    task_names = (1..num_tasks).collect{|i|i.to_s}
+    task_names.each do |i|
+      task i do
+        threads_m.synchronize{ threads << Thread.current }
+        sleep sleep_time
+      end
+    end
+    multitask :all => task_names
+    start_t = Time.now
+    Task[:all].invoke
+    total_time = Time.now - start_t
+    assert(threads.count > 1, "only #{threads.count} threads were recorded")
+    assert( total_time < (num_tasks * sleep_time), "Multitasks took too much time (#{total_time}) should take much less" )
+  end
+  
 end
 

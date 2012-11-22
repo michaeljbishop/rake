@@ -1,8 +1,6 @@
 require 'thread'
 require 'set'
 
-require 'rake/promise'
-
 module Rake
 
   class ThreadPool              # :nodoc: all
@@ -20,26 +18,21 @@ module Rake
       @history = []
       @history_mon = Monitor.new
       @total_threads_in_play = 0
+      @exceptions = []
+      @exceptions_mon = Monitor.new
     end
 
-    # Creates a future executed by the +ThreadPool+.
-    #
-    # The args are passed to the block when executing (similarly to
-    # <tt>Thread#new</tt>) The return value is an object representing
-    # a future which has been created and added to the queue in the
-    # pool. Sending <tt>#value</tt> to the object will sleep the
-    # current thread until the future is finished and will return the
-    # result (or raise an exception thrown from the future)
-    def future(*args, &block)
-      promise = Promise.new(args, &block)
-      promise.recorder = lambda { |*stats| stat(*stats) }
-
-      @queue.enq promise
-      stat :queued, :item_id => promise.object_id
-      start_thread
-      promise
+    def start(*args, &block)
+      if args.empty?
+        enqueue_block(&block)
+      else
+        args_dup = args.collect { |a| begin; a.dup; rescue; a; end }
+        enqueue_block do
+          block.call(*args_dup)
+        end
+      end
     end
-
+    
     # Waits until the queue of futures is empty and all threads have exited.
     def join
       @threads_mon.synchronize do
@@ -47,7 +40,8 @@ module Rake
           stat :joining
           @join_cond.wait unless @threads.empty?
           stat :joined
-        rescue Exception => e
+        # rescue an exception just in case any deadlocks occurred
+        rescue => e
           stat :joined
           $stderr.puts e
           $stderr.print "Queue contains #{@queue.size} items. Thread pool contains #{@threads.count} threads\n"
@@ -59,6 +53,13 @@ module Rake
             $stderr.puts t.backtrace.join("\n") if t.respond_to? :backtrace
           end
           raise e
+        end
+
+        # raise the exceptions that happened while executing tasks
+        begin
+          @exceptions.each do |exp|
+            raise exp
+          end
         end
       end
     end
@@ -89,6 +90,17 @@ module Rake
 
     private
 
+    # Adds a block to the queue for execution by a thread
+    def enqueue_block(&block)
+      if @max_active_threads == 0
+        block.call
+        return
+      end
+      @queue.enq block
+      stat :queued, :item_id => block.object_id
+      start_thread
+    end
+    
     # processes one item on the queue. Returns true if there was an
     # item to process, false if there was no item
     def process_queue_item      #:nodoc:
@@ -98,13 +110,18 @@ module Rake
       # still could have had an item which by this statement
       # is now gone. For this reason we pass true to Queue#deq
       # because we will sleep indefinitely if it is empty.
-      promise = @queue.deq(true)
-      stat :dequeued, :item_id => promise.object_id
-      promise.work
-      return true
-
+      begin
+        block = @queue.deq(true)
       rescue ThreadError # this means the queue is empty
-      false
+        return false
+      end
+      stat :dequeued, :item_id => block.object_id
+      begin
+        block.call
+      rescue => e
+        @exceptions_mon.synchronize{ @exceptions << e }
+      end
+      true
     end
 
     def start_thread # :nodoc:

@@ -149,22 +149,26 @@ module Rake
     # Invoke the task if it is needed.  Prerequisites are invoked first.
     def invoke(*args)
       task_args = TaskArguments.new(arg_names, args)
-      invoke_with_call_chain(task_args, InvocationChain::EMPTY)
+      invoke_with_call_chain(task_args, InvocationChain::EMPTY, true)
     end
 
     # Same as invoke, but explicitly pass a call chain to detect
     # circular dependencies.
-    def invoke_with_call_chain(task_args, invocation_chain) # :nodoc:
+    def invoke_with_call_chain(task_args, invocation_chain, wait) # :nodoc:
       new_chain = InvocationChain.append(self, invocation_chain)
-      @lock.synchronize do
-        if application.options.trace
-          application.trace "** Invoke #{name} #{format_trace_flags}"
-        end
-        return if @already_invoked
-        @already_invoked = true
-        invoke_prerequisites(task_args, new_chain)
-        execute(task_args) if needed?
+      if wait
+        @lock.enter
+      else
+        return unless @lock.try_enter
       end
+      if application.options.trace
+        application.trace "** Invoke #{name} #{format_trace_flags}"
+      end
+      return if @already_invoked
+      @already_invoked = true
+      invoke_prerequisites(task_args, new_chain)
+      execute(task_args) if needed?
+      @lock.exit
     rescue Exception => ex
       add_chain_to(ex, new_chain)
       raise ex
@@ -185,19 +189,21 @@ module Rake
     
     # Invoke all the prerequisites of a task.
     def invoke_prerequisites(task_args, invocation_chain) # :nodoc:
-      futures = []
-      prerequisite_tasks.each do |p|
+      invocations = prerequisite_tasks.collect do |p|
         prereq_args = task_args.new_scope(p.arg_names)
-        invocation = proc do |r|
-          r.invoke_with_call_chain(prereq_args, invocation_chain)
-        end
-        if self.invoke_prereqs_concurrently?
-          futures << application.thread_pool.future(p,&invocation)
-        else
-          invocation.call(p)
+        proc do |wait|
+          p.invoke_with_call_chain(prereq_args, invocation_chain, wait)          
         end
       end
-      futures.each { |f| f.value }
+      if self.invoke_prereqs_concurrently?
+        # we save the first invocation for this thread
+        invocations.drop(1).each do |invocation|
+          application.thread_pool.start(false,&invocation)
+        end
+      end
+      invocations.each do |invocation|
+        invocation.call(true)
+      end
     end
 
     # Format the trace flags for display.
